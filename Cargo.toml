@@ -6,18 +6,19 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+freetype-rs = "0.32.0"
 
 [dependencies.sdl2]
 version = "0.35.2"
 default_features = false
-features = ["ttf","image","static-link","use-vcpkg"]
+features = ["ttf","image","static-link","bundled"]
 
-[package.metadata.vcpkg]
-dependencies = ["sdl2", "sdl2-image[libjpeg-turbo,tiff,libwebp]", "sdl2-ttf"]
-git = "https://github.com/microsoft/vcpkg"
-tag = "2023.02.24"
+#[package.metadata.vcpkg]
+#dependencies = ["sdl2", "sdl2-image[libjpeg-turbo,tiff,libwebp]", "sdl2-ttf"]
+#git = "https://github.com/microsoft/vcpkg"
+#tag = "2023.02.24"
 
-[package.metadata.vcpkg.target]
-x86_64-pc-windows-msvc = { triplet = "x64-windows-static" }
-x86_64-pc-windows-gnu  = { triplet = "x64-mingw-dynamic" }
+#[package.metadata.vcpkg.target]
+#x86_64-pc-windows-msvc = { triplet = "x64-windows-static" }
+#x86_64-pc-windows-gnu  = { triplet = "x64-mingw-dynamic" }
 
