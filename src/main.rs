@@ -241,8 +241,10 @@ impl<'a> Renderer<'a> {
                 if glyph.bitmap_top() > max_ascent as i32 {
                     max_ascent = glyph.bitmap_top() as u32;
                 }
-                if (glyph.metrics().height as u32 >> 6) > max_descent {
-                    max_descent = (glyph.metrics().height as u32 >> 6);
+                if ((glyph.metrics().height as i32 >> 6) - glyph.bitmap_top()) > max_descent as i32
+                {
+                    max_descent =
+                        ((glyph.metrics().height as i32 >> 6) - glyph.bitmap_top()) as u32;
                 }
 
                 let mut rgb = Vec::<u8>::with_capacity(glyph.bitmap().buffer().len() * 3);
@@ -336,7 +338,13 @@ impl<'a> Renderer<'a> {
         let mut result: Option<Result<RefTexture<'a>, (RefTexture<'a>, String)>> = None;
         self.canvas
             .with_texture_canvas(&mut (*tex).borrow_mut(), |canvas| {
-                dbg!(canvas.render_target_supported());
+                canvas.set_draw_color(Color::RGB(255, 0, 0));
+                canvas.fill_rect(Rect::new(
+                    x_offset as i32,
+                    (y_coord * self.loaded_font.glyph_height) as i32,
+                    self.width,
+                    self.loaded_font.glyph_height,
+                ));
                 let mut chars = text.chars();
                 while let Some(ch) = chars.next() {
                     let info = self.loaded_font.get_char(ch as usize).unwrap();
@@ -348,14 +356,14 @@ impl<'a> Renderer<'a> {
                     let src = info.bbox(self.loaded_font.whitespace_width);
 
                     if x + info.width + self.loaded_font.char_spacing > self.width {
-                        let rem: String = String::from(ch) + &chars.rev().collect::<String>();
+                        let rem: String = String::from(ch) + &chars.collect::<String>();
                         result = Some(Err((tex.clone(), rem)));
                         return;
                     }
 
                     let dest = self.loaded_font.get_char_aligned_rect(
                         x as i32,
-                        0 as i32 - self.loaded_font.descender, //y_coord as i32 * self.loaded_font.glyph_height as i32,
+                        0 as i32, //y_coord as i32 * self.loaded_font.glyph_height as i32,
                         &info,
                     );
                     dbg!(dest);
