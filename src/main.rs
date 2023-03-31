@@ -1,12 +1,11 @@
 #![deny(rust_2018_idioms)]
-mod ResMan;
+mod res_man;
+use res_man::ResourceLoader;
+use res_man::ResourceManager;
 use sdl2;
-use ResMan::ResourceLoader;
-use ResMan::ResourceManager;
 
 use sdl2::event::Event;
 use sdl2::event::EventType;
-use sdl2::image::LoadTexture;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::pixels::PixelFormatEnum;
@@ -25,7 +24,7 @@ use std::time::Duration;
 
 const ANSI_CHAR_RANGE: u32 = 0x80;
 const FONT_FILE: &'static str = "Arial.ttf";
-const FONT_SIZE: u32 = 64;
+const FONT_SIZE: u32 = 32;
 const FONT_SPACING: u32 = 2 * (FONT_SIZE / 64); // scales with font_size
 const ATLAS_MAX_WIDTH: u32 = 16384;
 const ATLAS_MAX_HEIGHT: u32 = 16384;
@@ -45,49 +44,53 @@ pub struct AtlasEntry {
 }
 
 impl AtlasEntry {
-    pub fn bbox(&self, min_width: u32) -> Rect {
-        let corr_width = if self.width > 0 {
-            self.width
-        } else {
-            min_width
-        };
-        return Rect::new(self.x as i32, self.y as i32, corr_width, self.height);
+    pub fn bbox(&self) -> Rect {
+        return Rect::new(self.x as i32, self.y as i32, self.width, self.height);
     }
 }
 
 #[derive(Default, Clone)]
 pub struct FontDef {
     pub glyph_height: u32,
+    pub glyph_width: u32,
     pub whitespace_width: u32,
     pub char_spacing: u32,
     pub char_lookup: HashMap<usize, Rc<AtlasEntry>>,
-    pub ascender: i32,
-    pub descender: i32,
     pub max_ascent: u32,
     pub max_descent: u32,
+    pub max_back: u32,
+    pub max_forward: u32,
+    pub font_pixel_size: u32,
+    pub monospaced: bool,
 }
 
 impl FontDef {
     pub fn new(
         char_lookup: HashMap<usize, Rc<AtlasEntry>>,
         max_height: u32,
+        max_width: u32,
         char_spacing: u32,
-        ascender: i32,
-        descender: i32,
         max_ascent: u32,
         max_descent: u32,
+        max_back: u32,
+        max_forward: u32,
+        font_pixel_size: u32,
+        monospaced: bool,
     ) -> FontDef {
         let avg_width: u32 =
             char_lookup.values().map(|x| x.width).sum::<u32>() / char_lookup.len() as u32;
         FontDef {
             char_lookup,
             char_spacing,
-            ascender,
-            descender,
             glyph_height: max_height,
+            glyph_width: max_width,
             whitespace_width: avg_width,
             max_ascent,
             max_descent,
+            max_back,
+            max_forward,
+            font_pixel_size,
+            monospaced,
         }
     }
     /// Get the corrected position of a character
@@ -95,17 +98,16 @@ impl FontDef {
     pub fn get_char_aligned_rect<A: Into<i32>>(&self, x: A, y: A, info: &AtlasEntry) -> Rect {
         let x: i32 = x.into();
         let y: i32 = y.into();
-        let w = if info.width > 1 {
-            info.width as u32
-        } else {
-            self.whitespace_width
-        };
-        let h = info.height as u32;
 
         //let align_lowest = self.glyph_height as i32 - info.height as i32;
 
         let baseline_dist = self.max_ascent as i32 - info.bt;
-        Rect::new(x, y + baseline_dist, w, h)
+        let center_dist: i32 = if self.monospaced {
+            self.max_forward as i32 + info.bl
+        } else {
+            0
+        };
+        Rect::new(x + center_dist, y + baseline_dist, info.width, info.height)
     }
 
     /// Get the position of the character in the texture atlas
@@ -158,12 +160,16 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    pub fn build_atlas<A: Into<String>>(&mut self, font_path: A) {
+    pub fn build_atlas<A: Into<String>>(&mut self, font_path: A, font_size: u32, monospaced: bool) {
         use freetype::face::LoadFlag;
         use freetype::Library;
-        //let cached_chars: [u8; font_size] = (0..128).collect::<Vec<_>>().try_into().expect("Wrong size iterator");
+
+        // these variables will be used to determine the effective width and height of a character
         let mut max_ascent: u32 = 0;
         let mut max_descent: u32 = 0;
+        let mut max_forward: u32 = 0;
+        let mut max_back: u32 = 0;
+        let mut max_width: u32 = 0;
 
         let lib = Library::init()
             .map_err(|err| {
@@ -180,7 +186,7 @@ impl<'a> Renderer<'a> {
             .unwrap();
         //font_face.set_char_size(40*64, 0, 96, 96).unwrap();
         font_face
-            .set_pixel_sizes(FONT_SIZE, 0)
+            .set_pixel_sizes(font_size, 0)
             .map_err(|err| {
                 eprintln!("Failed to set pixel sizes: {err}");
             })
@@ -194,20 +200,19 @@ impl<'a> Renderer<'a> {
         let metrics = font_face
             .size_metrics()
             .expect("Could not get font metrics: No value returned.");
-
         let atlas_glyph_height = metrics.height as u32 >> 6;
 
         let mut _atlas_rows = 0;
         let mut _atlas_cols = 0;
         let mut _atlas_width = 0;
-        let glyph_total_width = ANSI_CHAR_RANGE * FONT_SIZE;
+        let glyph_total_width = ANSI_CHAR_RANGE * font_size;
         if glyph_total_width > ATLAS_MAX_WIDTH {
             _atlas_rows = (glyph_total_width / ATLAS_MAX_WIDTH) + 1;
-            _atlas_cols = ATLAS_MAX_WIDTH / FONT_SIZE;
+            _atlas_cols = ATLAS_MAX_WIDTH / font_size;
             _atlas_width = ATLAS_MAX_WIDTH;
         } else if glyph_total_width % ATLAS_MAX_WIDTH == 0 {
             _atlas_rows = glyph_total_width / ATLAS_MAX_WIDTH;
-            _atlas_cols = ATLAS_MAX_WIDTH / FONT_SIZE;
+            _atlas_cols = ATLAS_MAX_WIDTH / font_size;
             _atlas_width = ATLAS_MAX_WIDTH;
         } else {
             _atlas_rows = 1;
@@ -227,7 +232,7 @@ impl<'a> Renderer<'a> {
                 })
                 .unwrap();
 
-        let src = Rect::new(0, 0, FONT_SIZE, atlas_glyph_height);
+        let src = Rect::new(0, 0, font_size, atlas_glyph_height);
 
         for y in 0.._atlas_rows {
             for x in 0.._atlas_cols {
@@ -238,6 +243,7 @@ impl<'a> Renderer<'a> {
                     .unwrap();
 
                 let glyph = font_face.glyph();
+
                 if glyph.bitmap_top() > max_ascent as i32 {
                     max_ascent = glyph.bitmap_top() as u32;
                 }
@@ -245,6 +251,17 @@ impl<'a> Renderer<'a> {
                 {
                     max_descent =
                         ((glyph.metrics().height as i32 >> 6) - glyph.bitmap_top()) as u32;
+                }
+                if glyph.bitmap_left() > max_back as i32 {
+                    max_back = glyph.bitmap_left() as u32;
+                }
+                if ((glyph.metrics().width as i32 >> 6) - glyph.bitmap_left()) > max_forward as i32
+                {
+                    max_forward =
+                        ((glyph.metrics().width as i32 >> 6) - glyph.bitmap_left()) as u32;
+                }
+                if (glyph.metrics().width as u32 >> 6) > max_width {
+                    max_width = glyph.metrics().width as u32 >> 6;
                 }
 
                 let mut rgb = Vec::<u8>::with_capacity(glyph.bitmap().buffer().len() * 3);
@@ -262,9 +279,9 @@ impl<'a> Renderer<'a> {
                 )
                 .unwrap();
                 let dest = Rect::new(
-                    (x * FONT_SIZE) as i32,
+                    (x * font_size) as i32,
                     (y * atlas_glyph_height) as i32,
-                    FONT_SIZE,
+                    font_size,
                     atlas_glyph_height,
                 );
                 letter
@@ -300,26 +317,20 @@ impl<'a> Renderer<'a> {
             })
             .unwrap();
 
-        dbg!(max_ascent);
-        dbg!(max_descent);
+        dbg!(&map);
         self.loaded_font = FontDef::new(
             map,
             max_ascent + max_descent,
+            max_width, //max_forward + max_back,
             FONT_SPACING,
-            font_face.ascender() as i32 >> 6,
-            font_face.descender() as i32 >> 6,
             max_ascent,
             max_descent,
+            font_size,
+            max_back,
+            max_forward,
+            monospaced,
         );
     }
-
-    //pub fn font(&self) -> &FontDef {
-    //    if let Some(_) = self._font {
-    //        &self._font.as_ref().unwrap()
-    //    } else {
-    //        panic!("No font loaded!");
-    //    }
-    //}
 
     pub fn render_line<A: Into<String>>(
         &mut self,
@@ -338,24 +349,20 @@ impl<'a> Renderer<'a> {
         let mut result: Option<Result<RefTexture<'a>, (RefTexture<'a>, String)>> = None;
         self.canvas
             .with_texture_canvas(&mut (*tex).borrow_mut(), |canvas| {
-                canvas.set_draw_color(Color::RGB(255, 0, 0));
-                canvas.fill_rect(Rect::new(
-                    x_offset as i32,
-                    (y_coord * self.loaded_font.glyph_height) as i32,
-                    self.width,
-                    self.loaded_font.glyph_height,
-                ));
+                //canvas.set_draw_color(Color::RGB(255, 0, 0));
+                //canvas
+                //    .fill_rect(Rect::new(
+                //        x_offset as i32,
+                //        (y_coord * self.loaded_font.glyph_height) as i32,
+                //        self.width,
+                //        self.loaded_font.glyph_height,
+                //    ))
+                //    .unwrap();
                 let mut chars = text.chars();
                 while let Some(ch) = chars.next() {
                     let info = self.loaded_font.get_char(ch as usize).unwrap();
-                    //println!(
-                    //    "Rendering char {ch} with atlas pos {px} and {py}",
-                    //    px = info.x,
-                    //    py = info.y
-                    //);
-                    let src = info.bbox(self.loaded_font.whitespace_width);
-
-                    if x + info.width + self.loaded_font.char_spacing > self.width {
+                    let src = info.bbox();
+                    if x + info.width > self.width {
                         let rem: String = String::from(ch) + &chars.collect::<String>();
                         result = Some(Err((tex.clone(), rem)));
                         return;
@@ -366,9 +373,17 @@ impl<'a> Renderer<'a> {
                         0 as i32, //y_coord as i32 * self.loaded_font.glyph_height as i32,
                         &info,
                     );
-                    dbg!(dest);
                     canvas.copy(&atlas.borrow(), src, dest).unwrap();
-                    x += src.width() + self.loaded_font.char_spacing;
+                    x += if self.loaded_font.monospaced {
+                        self.loaded_font.glyph_width
+                    } else {
+                        if src.width() <= 1 {
+                            // HACK: whitespaces and stuff...
+                            self.loaded_font.whitespace_width
+                        } else {
+                            info.width
+                        }
+                    }
                 }
                 result = Some(Ok(tex.clone()))
             })
@@ -455,7 +470,7 @@ pub fn main() -> Result<(), ()> {
     let texman = window_canvas.texture_creator();
 
     let mut renderer = Renderer::new(window_canvas, &texman, WIDTH, HEIGHT);
-    renderer.build_atlas(FONT_FILE);
+    renderer.build_atlas(FONT_FILE, FONT_SIZE, false);
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|err| eprintln!("Failed to get event pump: {err}"))
