@@ -1,5 +1,7 @@
 #![deny(rust_2018_idioms)]
 mod res_man;
+mod screen_manager;
+
 use res_man::ResourceLoader;
 use res_man::ResourceManager;
 use sdl2;
@@ -21,6 +23,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
+
+use crate::screen_manager::Renderable;
+use crate::screen_manager::ScreenLine;
 
 const ANSI_CHAR_RANGE: u32 = 0x80;
 const FONT_FILE: &'static str = "Arial.ttf";
@@ -107,7 +112,12 @@ impl FontDef {
         } else {
             0
         };
-        Rect::new(x + center_dist, y + baseline_dist, info.width, info.height)
+        let w = if info.width <= 1 {
+            self.whitespace_width
+        } else {
+            info.width
+        };
+        Rect::new(x + center_dist, y + baseline_dist, w, info.height)
     }
 
     /// Get the position of the character in the texture atlas
@@ -158,6 +168,26 @@ impl<'a> Renderer<'a> {
             width,
             height,
         }
+    }
+
+    pub fn render_from_atlas(&mut self, ch: usize, x: i32, y: i32) -> Rect {
+        let entry = self
+            .loaded_font
+            .get_char(ch)
+            .map_err(|_| {
+                eprintln!("Could not get atlas entry");
+            })
+            .unwrap();
+        let src = entry.bbox();
+        let dst = self.loaded_font.get_char_aligned_rect(x, y, entry.as_ref());
+        let atlas = self.texture_manager.get(&usize::MAX).unwrap();
+        self.canvas
+            .copy(&atlas.borrow(), src, dst)
+            .map_err(|err| {
+                eprintln!("Could not copy to canvas: {err}");
+            })
+            .unwrap();
+        dst
     }
 
     pub fn build_atlas<A: Into<String>>(&mut self, font_path: A, font_size: u32, monospaced: bool) {
@@ -349,15 +379,6 @@ impl<'a> Renderer<'a> {
         let mut result: Option<Result<RefTexture<'a>, (RefTexture<'a>, String)>> = None;
         self.canvas
             .with_texture_canvas(&mut (*tex).borrow_mut(), |canvas| {
-                //canvas.set_draw_color(Color::RGB(255, 0, 0));
-                //canvas
-                //    .fill_rect(Rect::new(
-                //        x_offset as i32,
-                //        (y_coord * self.loaded_font.glyph_height) as i32,
-                //        self.width,
-                //        self.loaded_font.glyph_height,
-                //    ))
-                //    .unwrap();
                 let mut chars = text.chars();
                 while let Some(ch) = chars.next() {
                     let info = self.loaded_font.get_char(ch as usize).unwrap();
@@ -454,8 +475,9 @@ pub fn main() -> Result<(), ()> {
         .unwrap();
 
     let window = video_subsystem
-        .window("rust-sdl2 demo", WIDTH, HEIGHT)
+        .window("Saute Text Editor", WIDTH, HEIGHT)
         .position_centered()
+        .resizable()
         .build()
         .map_err(|err| eprintln!("Could not build window: {err}"))
         .unwrap();
@@ -475,19 +497,16 @@ pub fn main() -> Result<(), ()> {
         .event_pump()
         .map_err(|err| eprintln!("Failed to get event pump: {err}"))
         .unwrap();
-    event_pump.enable_event(EventType::TextInput);
-    // let mut window_surface = window
-    //     .surface()
-    //     .map_err(|err| {
-    //         eprintln!("Failed to get window surface: {err}");
-    //     })
-    //     .unwrap();
-    let atlas = renderer.texture_manager.get(&usize::MAX).unwrap();
-    renderer.canvas.copy(&(*atlas).borrow_mut(), None, None);
+
+    renderer.canvas.set_draw_color::<_>(Color::RGB(0, 0, 0));
+    renderer.canvas.clear();
     renderer.canvas.present();
 
-    let mut text_buffer: String = "".into();
+    event_pump.enable_event(EventType::TextInput);
+
+    let mut screen_man = screen_manager::TextScreen::new(WIDTH as usize);
     let mut need_update: bool = true;
+
     'running: loop {
         for event in event_pump.poll_iter() {
             match event {
@@ -496,18 +515,29 @@ pub fn main() -> Result<(), ()> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Backspace),
+                    ..
+                } => {
+                    println!("[INFO] Backspace pressed");
+                    screen_man.pop_char();
+                    need_update = true;
+                }
                 Event::KeyDown { keycode, .. } => {
-                    println!("[INFO] Event::KeyDown triggered");
                     if let Some(code) = keycode {
-                        if code == Keycode::Backspace {
-                            text_buffer.pop();
+                        if code == Keycode::Return
+                        /* || code == Keycode::Return2 */
+                        {
+                            screen_man.push_char('\n');
                             need_update = true;
                         }
                     }
                 }
                 Event::TextInput { text, .. } => {
                     println!("[INFO] Event::TextInput triggered");
-                    text_buffer.push_str(&text);
+                    text.chars().for_each(|ch| {
+                        screen_man.push_char(ch);
+                    });
                     need_update = true;
                 }
                 Event::Window { win_event, .. } => {
@@ -522,6 +552,9 @@ pub fn main() -> Result<(), ()> {
                             //    .map_err(|err| eprintln!("Could not close window surface: {err}"))
                             //    .unwrap();
                             //window_surface = window.surface().unwrap();
+                            renderer.width = w as u32;
+                            renderer.height = h as u32;
+                            screen_man.set_width(w as usize);
                             need_update = true;
                         }
                         _ => {}
@@ -530,16 +563,30 @@ pub fn main() -> Result<(), ()> {
                 _ => {}
             }
         }
-
         if need_update {
             // HACK: Trick to get backspace to work somewhat.
             // Need to fix this when proper line management is running.
+            println!(
+                "[INFO] Updating screen! {w} x {h}",
+                w = renderer.width,
+                h = renderer.height
+            );
             renderer.canvas.set_draw_color::<_>(Color::RGB(0, 0, 0));
-            renderer.canvas.clear();
-            renderer.render_to_canvas(&text_buffer)?;
+            renderer
+                .canvas
+                .fill_rect(Rect::new(0, 0, renderer.width, renderer.height))
+                .unwrap();
+
+            screen_man
+                .render(&mut renderer, 0, 0)
+                .map_err(|err| {
+                    eprintln!("Could not render to canvas: {err}");
+                })
+                .unwrap();
             renderer.canvas.present();
             need_update = false;
         }
+
         ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
 
