@@ -152,6 +152,9 @@ pub struct Renderer<'a> {
     loaded_font: FontDef,
     width: u32,
     height: u32,
+    cursor_x: i32,
+    cursor_y: i32,
+    _cursor_enabled: bool,
 }
 
 impl<'a> Renderer<'a> {
@@ -167,6 +170,9 @@ impl<'a> Renderer<'a> {
             texture_manager: TextureManager::new(&texture_creator),
             width,
             height,
+            cursor_x: 0,
+            cursor_y: 0,
+            _cursor_enabled: false,
         }
     }
 
@@ -453,6 +459,7 @@ impl<'a> Renderer<'a> {
             }
             y_coord += 1;
         }
+
         Ok(Rect::new(
             0,
             0,
@@ -506,7 +513,7 @@ pub fn main() -> Result<(), ()> {
 
     let mut screen_man = screen_manager::TextScreen::new(WIDTH as usize);
     let mut need_update: bool = true;
-
+    screen_man.cursor_enable();
     'running: loop {
         for event in event_pump.poll_iter() {
             match event {

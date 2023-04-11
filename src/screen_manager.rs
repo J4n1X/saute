@@ -1,14 +1,8 @@
-use std::borrow::Borrow;
+use sdl2::rect::Rect;
 
-use sdl2::{
-    rect::Rect,
-    render::{Canvas, RenderTarget},
-    sys::Screen,
-};
-
-use crate::{AtlasEntry, Renderer};
+use crate::Renderer;
 pub trait Renderable {
-    fn render(&self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String>;
+    fn render(&mut self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String>;
 }
 
 #[derive(Default, Clone)]
@@ -40,7 +34,7 @@ impl ScreenLine {
 
 impl Renderable for ScreenLine {
     // one line can wrap multiple screen lines!
-    fn render(&self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
+    fn render(&mut self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
         let mut w = 0;
         let mut x_offset = 0;
         let mut y_offset = y + self.row as u32 * target.loaded_font.glyph_height;
@@ -68,13 +62,14 @@ impl Renderable for ScreenLine {
 
             x_offset += info_w;
             if x_offset < target.width {
-                w += x_offset;
+                w = x_offset;
             } else {
                 w = target.width;
             }
+            dbg!(w);
         }
         Ok(Rect::new(
-            0,
+            x as i32,
             y_offset as i32,
             w,
             target.loaded_font.glyph_height + y_offset - y,
@@ -87,6 +82,9 @@ pub struct TextScreen {
     lines: Vec<ScreenLine>,
     width: usize,
     rows: usize,
+    cursor_x: i32,
+    cursor_y: i32,
+    _cursor_enabled: bool,
 }
 
 impl TextScreen {
@@ -96,21 +94,56 @@ impl TextScreen {
             ..Default::default()
         }
     }
+    #[inline(always)]
     pub fn lines(&self) -> &Vec<ScreenLine> {
         &self.lines
     }
+    #[inline(always)]
     pub fn width(&self) -> usize {
         self.width
     }
+    #[inline(always)]
     pub fn set_width(&mut self, new_width: usize) {
         self.width = new_width;
     }
+    #[inline(always)]
     pub fn rows(&self) -> usize {
         self.rows
     }
+    #[inline(always)]
     pub fn cur_line(&self) -> Option<&ScreenLine> {
         self.lines.last()
     }
+    #[inline(always)]
+    pub fn cursor_enable(&mut self) {
+        self._cursor_enabled = true;
+    }
+    #[inline(always)]
+    pub fn cursor_disable(&mut self) {
+        self._cursor_enabled = false;
+    }
+    #[inline(always)]
+    pub fn cursor_enabled(&self) -> bool {
+        self._cursor_enabled
+    }
+    #[inline(always)]
+    pub fn get_cursor(&self) -> (i32, i32) {
+        return (self.cursor_x, self.cursor_y);
+    }
+
+    pub fn set_cursor(&mut self, x: i32, y: i32) -> Result<(), String> {
+        if self.width < x as usize {
+            return Err(format!(
+                "Cursor position out of bounds: Position is at X = {x}x{y}, but screen is only {w} pixels wide",
+                w = self.width
+            )
+            .to_string());
+        }
+        self.cursor_x = x;
+        self.cursor_y = y;
+        Ok(())
+    }
+
     pub fn push_char(&mut self, ch: char) {
         if let Some(cur_line) = self.lines.last_mut() {
             if (ch == '\n') {
@@ -141,12 +174,29 @@ impl TextScreen {
             None
         }
     }
+
+    fn put_cursor(&mut self, target: &mut Renderer<'_>) {
+        if self._cursor_enabled {
+            println!("Drawing cursor");
+            target
+                .canvas
+                .set_draw_color(sdl2::pixels::Color::RGB(255, 255, 255));
+            let dst = Rect::new(
+                self.cursor_x,
+                self.cursor_y,
+                target.loaded_font.glyph_width / 16,
+                target.loaded_font.glyph_height,
+            );
+            target.canvas.fill_rect(dst).unwrap();
+        }
+    }
 }
 
 impl Renderable for TextScreen {
-    fn render(&self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
+    fn render(&mut self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
         let mut y_offset = 0;
-        for line in &self.lines {
+        let mut x_offset = 0;
+        for line in &mut self.lines {
             let line_rect = line
                 .render(target, x, y + y_offset)
                 .map_err(|err| {
@@ -156,7 +206,12 @@ impl Renderable for TextScreen {
             if line_rect.height() > target.loaded_font.glyph_height {
                 y_offset += line_rect.height() - target.loaded_font.glyph_height;
             }
+            x_offset = line_rect.width();
         }
+        self.set_cursor((x + x_offset) as i32, (y + y_offset) as i32)
+            .unwrap();
+
+        self.put_cursor(target);
         Ok(Rect::new(
             x as i32,
             y as i32,

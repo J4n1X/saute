@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, cell::RefCell, collections::HashMap, fmt::Display, hash::Hash, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, hash::Hash, rc::Rc};
 
 pub trait ResourceLoader<'l, R> {
     type Args: ?Sized;
