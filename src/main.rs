@@ -398,7 +398,7 @@ impl<'a> Renderer<'a> {
 pub fn main() -> Result<(), ()> {
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
-    const FONT_FILE: &'static str = "Arial.ttf";
+    const FONT_FILE: &'static str = "fonts/Arial.ttf";
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context
