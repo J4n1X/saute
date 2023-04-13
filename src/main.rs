@@ -25,10 +25,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::screen_manager::Renderable;
-use crate::screen_manager::ScreenLine;
 
 const ANSI_CHAR_RANGE: u32 = 0x80;
-const FONT_FILE: &'static str = "Arial.ttf";
 const FONT_SIZE: u32 = 32;
 const FONT_SPACING: u32 = 2 * (FONT_SIZE / 64); // scales with font_size
 const ATLAS_MAX_WIDTH: u32 = 16384;
@@ -36,21 +34,59 @@ const ATLAS_MAX_HEIGHT: u32 = 16384;
 
 type RefTexture<'a> = Rc<RefCell<Texture<'a>>>;
 
-#[derive(Default, Debug, Clone)]
-pub struct AtlasEntry {
-    pub x: u32,
-    pub y: u32,
-    pub height: u32,
-    pub width: u32,
+#[derive(Debug, Clone)]
+pub struct FontChar {
+    pub ch: char,
+    pub bbox: Rect,
     pub _ax: u32,
     pub _ay: u32,
     pub bl: i32,
     pub bt: i32,
 }
 
-impl AtlasEntry {
-    pub fn bbox(&self) -> Rect {
-        return Rect::new(self.x as i32, self.y as i32, self.width, self.height);
+impl FontChar {
+    fn default() -> Self {
+        FontChar {
+            ch: 0 as char,
+            bbox: Rect::new(0, 0, 0, 0),
+            _ax: 0,
+            _ay: 0,
+            bl: 0,
+            bt: 0,
+        }
+    }
+    fn new(ch: char, bbox: Rect, _ax: u32, _ay: u32, bl: i32, bt: i32) -> Self {
+        FontChar {
+            ch,
+            bbox,
+            _ax,
+            _ay,
+            bl,
+            bt,
+        }
+    }
+}
+
+impl Renderable for FontChar {
+    fn render(&self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
+        let dst = target
+            .loaded_font
+            .get_char_aligned_rect(x as i32, y as i32, self);
+        target
+            .canvas
+            .copy(
+                &target
+                    .texture_manager
+                    .get(&usize::MAX)
+                    .unwrap_or_else(|| {
+                        panic!("Failed to get texture atlas!");
+                    })
+                    .clone()
+                    .borrow(),
+                self.bbox,
+                dst,
+            )
+            .map(|_| dst)
     }
 }
 
@@ -60,18 +96,17 @@ pub struct FontDef {
     pub glyph_width: u32,
     pub whitespace_width: u32,
     pub char_spacing: u32,
-    pub char_lookup: HashMap<usize, Rc<AtlasEntry>>,
+    pub char_lookup: HashMap<usize, Rc<FontChar>>,
     pub max_ascent: u32,
     pub max_descent: u32,
     pub max_back: u32,
     pub max_forward: u32,
     pub font_pixel_size: u32,
-    pub monospaced: bool,
 }
 
 impl FontDef {
     pub fn new(
-        char_lookup: HashMap<usize, Rc<AtlasEntry>>,
+        char_lookup: HashMap<usize, Rc<FontChar>>,
         max_height: u32,
         max_width: u32,
         char_spacing: u32,
@@ -80,10 +115,9 @@ impl FontDef {
         max_back: u32,
         max_forward: u32,
         font_pixel_size: u32,
-        monospaced: bool,
     ) -> FontDef {
         let avg_width: u32 =
-            char_lookup.values().map(|x| x.width).sum::<u32>() / char_lookup.len() as u32;
+            char_lookup.values().map(|x| x.bbox.width()).sum::<u32>() / char_lookup.len() as u32;
         FontDef {
             char_lookup,
             char_spacing,
@@ -95,33 +129,29 @@ impl FontDef {
             max_back,
             max_forward,
             font_pixel_size,
-            monospaced,
         }
     }
     /// Get the corrected position of a character
     /// TODO: cache this information
-    pub fn get_char_aligned_rect<A: Into<i32>>(&self, x: A, y: A, info: &AtlasEntry) -> Rect {
+    pub fn get_char_aligned_rect(&self, x: i32, y: i32, info: &FontChar) -> Rect {
         let x: i32 = x.into();
         let y: i32 = y.into();
 
         //let align_lowest = self.glyph_height as i32 - info.height as i32;
 
         let baseline_dist = self.max_ascent as i32 - info.bt;
-        let center_dist: i32 = if self.monospaced {
-            self.max_forward as i32 + info.bl
-        } else {
-            0
-        };
-        let w = if info.width <= 1 {
+        let center_dist: i32 = self.max_forward as i32 + info.bl;
+
+        let w = if info.bbox.width() <= 1 {
             self.whitespace_width
         } else {
-            info.width
+            info.bbox.width()
         };
-        Rect::new(x + center_dist, y + baseline_dist, w, info.height)
+        Rect::new(x + center_dist, y + baseline_dist, w, info.bbox.height())
     }
 
     /// Get the position of the character in the texture atlas
-    pub fn get_char<A: Into<usize>>(&self, char: A) -> Result<Rc<AtlasEntry>, ()> {
+    pub fn get_char<A: Into<usize>>(&self, char: A) -> Result<Rc<FontChar>, ()> {
         let char: usize = char.into();
         if let Some(info) = self.char_lookup.get(&char) {
             Ok(info.clone())
@@ -152,8 +182,6 @@ pub struct Renderer<'a> {
     loaded_font: FontDef,
     width: u32,
     height: u32,
-    cursor_x: i32,
-    cursor_y: i32,
     _cursor_enabled: bool,
 }
 
@@ -170,33 +198,11 @@ impl<'a> Renderer<'a> {
             texture_manager: TextureManager::new(&texture_creator),
             width,
             height,
-            cursor_x: 0,
-            cursor_y: 0,
             _cursor_enabled: false,
         }
     }
 
-    pub fn render_from_atlas(&mut self, ch: usize, x: i32, y: i32) -> Rect {
-        let entry = self
-            .loaded_font
-            .get_char(ch)
-            .map_err(|_| {
-                eprintln!("Could not get atlas entry");
-            })
-            .unwrap();
-        let src = entry.bbox();
-        let dst = self.loaded_font.get_char_aligned_rect(x, y, entry.as_ref());
-        let atlas = self.texture_manager.get(&usize::MAX).unwrap();
-        self.canvas
-            .copy(&atlas.borrow(), src, dst)
-            .map_err(|err| {
-                eprintln!("Could not copy to canvas: {err}");
-            })
-            .unwrap();
-        dst
-    }
-
-    pub fn build_atlas<A: Into<String>>(&mut self, font_path: A, font_size: u32, monospaced: bool) {
+    pub fn build_atlas<A: Into<String>>(&mut self, font_path: A, font_size: u32) {
         use freetype::face::LoadFlag;
         use freetype::Library;
 
@@ -232,12 +238,11 @@ impl<'a> Renderer<'a> {
             .map_err(|err| eprintln!("Could not load first glyph from font: {err}"))
             .unwrap();
 
-        let mut map: HashMap<usize, Rc<AtlasEntry>> = Default::default();
+        let mut map: HashMap<usize, Rc<FontChar>> = Default::default();
         let metrics = font_face
             .size_metrics()
             .expect("Could not get font metrics: No value returned.");
         let atlas_glyph_height = metrics.height as u32 >> 6;
-
         let mut _atlas_rows = 0;
         let mut _atlas_cols = 0;
         let mut _atlas_width = 0;
@@ -328,32 +333,24 @@ impl<'a> Renderer<'a> {
                     .unwrap();
 
                 // add to map
-                let entry = AtlasEntry {
-                    _ax: glyph.advance().x as u32,
-                    _ay: glyph.advance().y as u32,
-                    x: x * FONT_SIZE,
-                    y: y * atlas_height,
-                    height: glyph.metrics().height as u32 >> 6,
-                    width: glyph.metrics().width as u32 >> 6,
-                    bl: glyph.bitmap_left(),
-                    bt: glyph.bitmap_top(),
-                };
+                let bbox = Rect::new(
+                    (x * FONT_SIZE) as i32,
+                    (y * atlas_height) as i32,
+                    glyph.metrics().width as u32 >> 6,
+                    glyph.metrics().height as u32 >> 6,
+                );
+                let entry = FontChar::new(
+                    char::from_u32(ch as u32).unwrap(),
+                    bbox,
+                    glyph.advance().x as u32 >> 6,
+                    glyph.advance().y as u32 >> 6,
+                    glyph.bitmap_left(),
+                    glyph.bitmap_top(),
+                );
                 map.insert(ch as usize, Rc::new(entry));
             }
         }
-        // let master_canvas = master_surface
-        //     .into_canvas()
-        //     .map_err(|err| eprintln!("Could not create atlas canvas: {err}"))
-        //     .unwrap();
-        let tex = self
-            .texture_manager
-            .load(usize::MAX, &master_surface)
-            .map_err(|err| {
-                eprintln!("Could not create texture from surface: {err}");
-            })
-            .unwrap();
 
-        dbg!(&map);
         self.loaded_font = FontDef::new(
             map,
             max_ascent + max_descent,
@@ -364,116 +361,14 @@ impl<'a> Renderer<'a> {
             font_size,
             max_back,
             max_forward,
-            monospaced,
         );
     }
-
-    pub fn render_line<A: Into<String>>(
-        &mut self,
-        y_coord: u32,
-        x_offset: u32,
-        text: A,
-    ) -> Result<RefTexture<'a>, (RefTexture<'a>, String)> {
-        let mut text: String = text.into();
-
-        let mut x = x_offset;
-        let atlas = self.texture_manager.get(&(usize::MAX)).unwrap();
-        let tex = self
-            .texture_manager
-            .create(y_coord as usize, self.width, self.loaded_font.glyph_height)
-            .unwrap();
-        let mut result: Option<Result<RefTexture<'a>, (RefTexture<'a>, String)>> = None;
-        self.canvas
-            .with_texture_canvas(&mut (*tex).borrow_mut(), |canvas| {
-                let mut chars = text.chars();
-                while let Some(ch) = chars.next() {
-                    let info = self.loaded_font.get_char(ch as usize).unwrap();
-                    let src = info.bbox();
-                    if x + info.width > self.width {
-                        let rem: String = String::from(ch) + &chars.collect::<String>();
-                        result = Some(Err((tex.clone(), rem)));
-                        return;
-                    }
-
-                    let dest = self.loaded_font.get_char_aligned_rect(
-                        x as i32,
-                        0 as i32, //y_coord as i32 * self.loaded_font.glyph_height as i32,
-                        &info,
-                    );
-                    canvas.copy(&atlas.borrow(), src, dest).unwrap();
-                    x += if self.loaded_font.monospaced {
-                        self.loaded_font.glyph_width
-                    } else {
-                        if src.width() <= 1 {
-                            // HACK: whitespaces and stuff...
-                            self.loaded_font.whitespace_width
-                        } else {
-                            info.width
-                        }
-                    }
-                }
-                result = Some(Ok(tex.clone()))
-            })
-            .unwrap();
-        return result.unwrap();
-    }
-
-    /// Fills the surface with text, starting from (0, 0)
-    pub fn render_to_canvas<A: Into<String>>(&mut self, text: A) -> Result<Rect, ()> {
-        let text = text.into();
-        let mut y_coord: u32 = 0;
-        let mut render_text = text;
-
-        'exit: loop {
-            match self.render_line(y_coord, 0, &render_text) {
-                Ok(tex) => {
-                    self.canvas
-                        .copy(
-                            &tex.borrow(),
-                            None,
-                            Rect::new(
-                                0,
-                                (y_coord * self.loaded_font.glyph_height) as i32,
-                                self.width,
-                                self.loaded_font.glyph_height,
-                            ),
-                        )
-                        .unwrap();
-                    break 'exit;
-                }
-                Err((tex, rem)) => {
-                    render_text = rem;
-                    self.canvas
-                        .copy(
-                            &tex.borrow(),
-                            None,
-                            Rect::new(
-                                0,
-                                (y_coord * self.loaded_font.glyph_height) as i32,
-                                self.width,
-                                self.loaded_font.glyph_height,
-                            ),
-                        )
-                        .unwrap();
-                }
-            }
-            y_coord += 1;
-        }
-
-        Ok(Rect::new(
-            0,
-            0,
-            self.width,
-            y_coord * self.loaded_font.glyph_height,
-        ))
-    }
 }
-
-//pub fn reinit_window_surface(window_surface: &mut WindowSurfaceRef, )
 
 pub fn main() -> Result<(), ()> {
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
+    const FONT_FILE: &'static str = "Arial.ttf";
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context
@@ -499,7 +394,7 @@ pub fn main() -> Result<(), ()> {
     let texman = window_canvas.texture_creator();
 
     let mut renderer = Renderer::new(window_canvas, &texman, WIDTH, HEIGHT);
-    renderer.build_atlas(FONT_FILE, FONT_SIZE, false);
+    renderer.build_atlas(FONT_FILE, FONT_SIZE);
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|err| eprintln!("Failed to get event pump: {err}"))
@@ -511,7 +406,11 @@ pub fn main() -> Result<(), ()> {
 
     event_pump.enable_event(EventType::TextInput);
 
-    let mut screen_man = screen_manager::TextScreen::new(WIDTH as usize);
+    let mut screen_man = screen_manager::TextScreen::new(
+        WIDTH as usize,
+        HEIGHT as usize,
+        renderer.loaded_font.glyph_height as usize,
+    );
     let mut need_update: bool = true;
     screen_man.cursor_enable();
     'running: loop {
@@ -522,28 +421,48 @@ pub fn main() -> Result<(), ()> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Backspace),
-                    ..
-                } => {
-                    println!("[INFO] Backspace pressed");
-                    screen_man.pop_char();
-                    need_update = true;
-                }
                 Event::KeyDown { keycode, .. } => {
                     if let Some(code) = keycode {
-                        if code == Keycode::Return
-                        /* || code == Keycode::Return2 */
-                        {
-                            screen_man.push_char('\n');
-                            need_update = true;
+                        match code {
+                            Keycode::Return | Keycode::Return2 => {
+                                let fch = renderer
+                                    .loaded_font
+                                    .get_char('\n' as usize)
+                                    .map_err(|_| {
+                                        eprintln!("Failed to get char '\\n' from texture atlas");
+                                    })
+                                    .unwrap();
+                                screen_man.push_char(fch);
+                                need_update = true;
+                            }
+                            Keycode::Backspace => {
+                                screen_man.pop_char();
+                                need_update = true;
+                            }
+                            Keycode::Right => {
+                                screen_man.cursor_forward();
+                                need_update = true;
+                            }
+
+                            Keycode::Left => {
+                                screen_man.cursor_back();
+                                need_update = true;
+                            }
+                            _ => {}
                         }
                     }
                 }
                 Event::TextInput { text, .. } => {
                     println!("[INFO] Event::TextInput triggered");
                     text.chars().for_each(|ch| {
-                        screen_man.push_char(ch);
+                        let fch = renderer
+                            .loaded_font
+                            .get_char(ch as usize)
+                            .map_err(|_| {
+                                eprintln!("Failed to get char {ch} from texture atlas");
+                            })
+                            .unwrap();
+                        screen_man.push_char(fch);
                     });
                     need_update = true;
                 }
@@ -554,11 +473,6 @@ pub fn main() -> Result<(), ()> {
                             println!(
                                 "[INFO] Window resized to {w}x{h}, need to reinit window surface"
                             );
-                            //window_surface
-                            //    .finish()
-                            //    .map_err(|err| eprintln!("Could not close window surface: {err}"))
-                            //    .unwrap();
-                            //window_surface = window.surface().unwrap();
                             renderer.width = w as u32;
                             renderer.height = h as u32;
                             screen_man.set_width(w as usize);
@@ -571,8 +485,6 @@ pub fn main() -> Result<(), ()> {
             }
         }
         if need_update {
-            // HACK: Trick to get backspace to work somewhat.
-            // Need to fix this when proper line management is running.
             println!(
                 "[INFO] Updating screen! {w} x {h}",
                 w = renderer.width,
@@ -585,7 +497,7 @@ pub fn main() -> Result<(), ()> {
                 .unwrap();
 
             screen_man
-                .render(&mut renderer, 0, 0)
+                .render_all(&mut renderer, 0, 0)
                 .map_err(|err| {
                     eprintln!("Could not render to canvas: {err}");
                 })
@@ -594,8 +506,8 @@ pub fn main() -> Result<(), ()> {
             need_update = false;
         }
 
-        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
-
+    println!("Final text buffer:\n{text}", text = screen_man.get_text());
     Ok(())
 }

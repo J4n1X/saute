@@ -1,13 +1,16 @@
+use std::rc::Rc;
+
 use sdl2::rect::Rect;
 
-use crate::Renderer;
+use crate::{FontChar, Renderer};
 pub trait Renderable {
-    fn render(&mut self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String>;
+    fn render(&self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String>;
 }
 
 #[derive(Default, Clone)]
 pub struct ScreenLine {
-    text: String,
+    content: Vec<Rc<FontChar>>,
+    width: u32,
     row: usize,
 }
 
@@ -18,55 +21,59 @@ impl ScreenLine {
             ..Default::default()
         }
     }
-    pub fn text(&self) -> &String {
-        &self.text
+    pub fn get_text(&self) -> String {
+        let str = self.content.iter().map(|fch| fch.ch).collect::<String>();
+        str
     }
-    pub fn row(&self) -> usize {
-        self.row
+    #[inline(always)]
+    pub fn content(&self) -> &Vec<Rc<FontChar>> {
+        &self.content
     }
-    pub fn push_char(&mut self, ch: char) {
-        self.text.push(ch as char);
+    pub fn push_char(&mut self, fch: Rc<FontChar>) {
+        self.width += fch.bbox.width();
+        self.content.push(fch);
     }
-    pub fn pop_char(&mut self) -> Option<char> {
-        self.text.pop()
+    pub fn pop_char(&mut self) -> Option<Rc<FontChar>> {
+        self.content.pop()
+    }
+    pub fn wrapped_bbox(&self, max_width: u32, row_height: u32) -> Rect {
+        let height = (self.width as f32 / max_width as f32).ceil() as u32 * row_height;
+        Rect::new(0, 0, self.width.clamp(0, max_width), height)
     }
 }
 
 impl Renderable for ScreenLine {
     // one line can wrap multiple screen lines!
-    fn render(&mut self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
+    fn render(&self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
         let mut w = 0;
         let mut x_offset = 0;
         let mut y_offset = y + self.row as u32 * target.loaded_font.glyph_height;
-        for ch in self.text.chars() {
-            let info = target
-                .loaded_font
-                .get_char(ch as usize)
-                .map_err(|_| {
-                    eprintln!("Could not get Atlas entry {ch}");
-                })
-                .unwrap();
-
-            let info_w = if info.width <= 1 {
+        for fch in &self.content {
+            let ch_w = if fch.bbox.width() <= 1 {
                 target.loaded_font.whitespace_width
             } else {
-                info.width
+                fch.bbox.width()
             };
 
-            if x_offset + info_w > target.width {
+            if x_offset + ch_w > target.width {
                 y_offset += target.loaded_font.glyph_height;
                 x_offset = 0;
             }
 
-            target.render_from_atlas(ch as usize, (x + x_offset) as i32, y_offset as i32);
-
-            x_offset += info_w;
+            // TODO: Make this generalized!
+            if !fch.ch.is_whitespace() {
+                fch.render(target, x + x_offset, y_offset)
+                    .map_err(|err| {
+                        eprintln!("Could not render character: {err}");
+                    })
+                    .unwrap();
+            }
+            x_offset += ch_w;
             if x_offset < target.width {
                 w = x_offset;
             } else {
                 w = target.width;
             }
-            dbg!(w);
         }
         Ok(Rect::new(
             x as i32,
@@ -79,24 +86,40 @@ impl Renderable for ScreenLine {
 
 #[derive(Default, Clone)]
 pub struct TextScreen {
-    lines: Vec<ScreenLine>,
+    //lines: Vec<ScreenLine>,
+    content: Vec<Rc<FontChar>>,
     width: usize,
-    rows: usize,
-    cursor_x: i32,
-    cursor_y: i32,
+    height: usize,
+    row_height: usize,
+    cursor_abs: u32,
+    cursor_col: u32,
+    cursor_row: u32,
     _cursor_enabled: bool,
 }
 
 impl TextScreen {
-    pub fn new(width: usize) -> Self {
-        TextScreen {
-            width,
-            ..Default::default()
+    fn put_cursor(&self, target: &mut Renderer<'_>, x: i32, y: i32) {
+        if self._cursor_enabled {
+            target
+                .canvas
+                .set_draw_color(sdl2::pixels::Color::RGB(255, 255, 255));
+            let dst = Rect::new(
+                x,
+                y,
+                target.loaded_font.glyph_width / 16,
+                target.loaded_font.glyph_height,
+            );
+            target.canvas.fill_rect(dst).unwrap();
         }
     }
-    #[inline(always)]
-    pub fn lines(&self) -> &Vec<ScreenLine> {
-        &self.lines
+
+    pub fn new(width: usize, height: usize, row_height: usize) -> Self {
+        TextScreen {
+            width,
+            height,
+            row_height,
+            ..Default::default()
+        }
     }
     #[inline(always)]
     pub fn width(&self) -> usize {
@@ -107,12 +130,12 @@ impl TextScreen {
         self.width = new_width;
     }
     #[inline(always)]
-    pub fn rows(&self) -> usize {
-        self.rows
+    pub fn height(&self) -> usize {
+        self.height
     }
     #[inline(always)]
-    pub fn cur_line(&self) -> Option<&ScreenLine> {
-        self.lines.last()
+    pub fn set_height(&mut self, new_height: usize) {
+        self.height = new_height;
     }
     #[inline(always)]
     pub fn cursor_enable(&mut self) {
@@ -126,97 +149,104 @@ impl TextScreen {
     pub fn cursor_enabled(&self) -> bool {
         self._cursor_enabled
     }
+
     #[inline(always)]
-    pub fn get_cursor(&self) -> (i32, i32) {
-        return (self.cursor_x, self.cursor_y);
+    pub fn set_cursor_row(&mut self, row: u32) {
+        self.cursor_row = row;
     }
 
-    pub fn set_cursor(&mut self, x: i32, y: i32) -> Result<(), String> {
-        if self.width < x as usize {
-            return Err(format!(
-                "Cursor position out of bounds: Position is at X = {x}x{y}, but screen is only {w} pixels wide",
-                w = self.width
-            )
-            .to_string());
+    #[inline(always)]
+    pub fn set_cursor_col(&mut self, col: u32) {
+        self.cursor_col = col;
+    }
+
+    pub fn get_text(&self) -> String {
+        self.content.iter().map(|fch| fch.ch).collect::<String>()
+    }
+
+    pub fn cursor_forward(&mut self) {
+        if let Some(fch) = self.content.get((self.cursor_abs) as usize) {
+            if fch.ch == '\n' {
+                self.cursor_col = 0;
+                self.cursor_row += 1;
+            }
+            self.cursor_col += 1;
+            self.cursor_abs += 1;
         }
-        self.cursor_x = x;
-        self.cursor_y = y;
-        Ok(())
     }
 
-    pub fn push_char(&mut self, ch: char) {
-        if let Some(cur_line) = self.lines.last_mut() {
-            if (ch == '\n') {
-                self.lines.push(ScreenLine::new(self.rows));
-                self.rows += 1;
+    pub fn cursor_back(&mut self) {
+        if let Some(_) = self.content.get((self.cursor_abs - 1) as usize) {
+            if self.cursor_col == 0 {
+                self.cursor_row -= 1;
+                self.cursor_col = self
+                    .content
+                    .iter()
+                    .rev()
+                    .take_while(|x| x.ch != '\n')
+                    .count() as u32;
+            }
+            self.cursor_col -= 1;
+            self.cursor_abs -= 1;
+            dbg!(self.cursor_col, self.cursor_abs);
+        }
+    }
+
+    #[inline(always)]
+    pub fn push_char(&mut self, fch: Rc<FontChar>) {
+        self.content.insert(self.cursor_abs as usize, fch.clone());
+        self.cursor_forward();
+    }
+    #[inline(always)]
+    pub fn pop_char(&mut self) -> Option<Rc<FontChar>> {
+        self.cursor_back();
+        if self.cursor_abs != 0 {
+            return Some(self.content.remove(self.cursor_abs as usize));
+        }
+        None
+    }
+    pub fn render_all(
+        &mut self,
+        target: &mut Renderer<'_>,
+        x: u32,
+        y: u32,
+    ) -> Result<Rect, String> {
+        let mut cur_col = 0u32;
+        let mut cur_row = 0u32;
+        let mut y_offset = 0u32;
+        let mut x_offset = 0u32;
+        for fch in &self.content {
+            if x + x_offset + fch.bbox.width() > self.width as u32 {
+                x_offset = 0;
+                y_offset += self.row_height as u32;
+            }
+            if fch.ch == '\n' {
+                cur_col = 0;
+                cur_row += 1;
+            }
+
+            // decide if we must render or not, we do not want whitespaces to be rendered.
+            let dst = if fch.ch.is_whitespace() {
+                target.loaded_font.get_char_aligned_rect(
+                    (x + x_offset) as i32,
+                    (y + y_offset) as i32,
+                    fch,
+                )
             } else {
-                cur_line.push_char(ch);
+                fch.render(target, x + x_offset, y + y_offset)
+                    .map_err(|err| {
+                        eprintln!("Failed to render character {ch}: {err}", ch = fch.ch);
+                    })
+                    .unwrap()
+            };
+
+            cur_col += 1;
+            x_offset += fch._ax as u32;
+            if self.cursor_enabled() && self.cursor_row == cur_row && self.cursor_col == cur_col {
+                self.put_cursor(target, dst.right(), (y + y_offset) as i32);
             }
-        } else {
-            let new_line = ScreenLine::new(self.rows);
-            self.lines.push(new_line);
-            self.rows += 1;
-
-            // recursive push
-            self.push_char(ch);
         }
-    }
-    pub fn pop_char(&mut self) -> Option<char> {
-        if let Some(cur_line) = self.lines.last_mut() {
-            if cur_line.text().is_empty() {
-                self.lines.pop();
-                self.rows -= 1;
-                return Some('\n');
-            } else {
-                return cur_line.pop_char();
-            }
-        } else {
-            None
-        }
-    }
 
-    fn put_cursor(&mut self, target: &mut Renderer<'_>) {
-        if self._cursor_enabled {
-            println!("Drawing cursor");
-            target
-                .canvas
-                .set_draw_color(sdl2::pixels::Color::RGB(255, 255, 255));
-            let dst = Rect::new(
-                self.cursor_x,
-                self.cursor_y,
-                target.loaded_font.glyph_width / 16,
-                target.loaded_font.glyph_height,
-            );
-            target.canvas.fill_rect(dst).unwrap();
-        }
-    }
-}
-
-impl Renderable for TextScreen {
-    fn render(&mut self, target: &mut Renderer<'_>, x: u32, y: u32) -> Result<Rect, String> {
-        let mut y_offset = 0;
-        let mut x_offset = 0;
-        for line in &mut self.lines {
-            let line_rect = line
-                .render(target, x, y + y_offset)
-                .map_err(|err| {
-                    eprintln!("Could not render line: {err}");
-                })
-                .unwrap();
-            if line_rect.height() > target.loaded_font.glyph_height {
-                y_offset += line_rect.height() - target.loaded_font.glyph_height;
-            }
-            x_offset = line_rect.width();
-        }
-        self.set_cursor((x + x_offset) as i32, (y + y_offset) as i32)
-            .unwrap();
-
-        self.put_cursor(target);
-        Ok(Rect::new(
-            x as i32,
-            y as i32,
-            self.width.try_into().unwrap(),
-            y_offset,
-        ))
+        Ok(Rect::new(x as i32, y as i32, x + x_offset, y_offset))
     }
 }
