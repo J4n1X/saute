@@ -202,6 +202,27 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    pub fn render_from_atlas(&mut self, ch: usize, x: i32, y: i32) -> Rect {
+        let entry = self
+            .loaded_font
+            .get_char(ch)
+            .map_err(|_| {
+                eprintln!("Could not get atlas entry");
+            })
+            .unwrap();
+        let src = entry.bbox;
+        let dst = self.loaded_font.get_char_aligned_rect(x, y, &entry);
+        let atlas = self.texture_manager.get(&usize::MAX).unwrap();
+
+        self.canvas
+            .copy(&atlas.borrow(), src, dst)
+            .map_err(|err| {
+                eprintln!("Could not copy to canvas: {err}");
+            })
+            .unwrap();
+        dst
+    }
+
     pub fn build_atlas<A: Into<String>>(&mut self, font_path: A, font_size: u32) {
         use freetype::face::LoadFlag;
         use freetype::Library;
@@ -351,6 +372,13 @@ impl<'a> Renderer<'a> {
             }
         }
 
+        self.texture_manager
+            .load(usize::MAX, &master_surface)
+            .map_err(|err| {
+                eprintln!("Could not create texture from surface: {err}");
+            })
+            .unwrap();
+
         self.loaded_font = FontDef::new(
             map,
             max_ascent + max_descent,
@@ -364,6 +392,8 @@ impl<'a> Renderer<'a> {
         );
     }
 }
+
+//pub fn reinit_window_surface(window_surface: &mut WindowSurfaceRef, )
 
 pub fn main() -> Result<(), ()> {
     const WIDTH: u32 = 800;

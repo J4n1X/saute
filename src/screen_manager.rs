@@ -188,7 +188,6 @@ impl TextScreen {
             }
             self.cursor_col -= 1;
             self.cursor_abs -= 1;
-            dbg!(self.cursor_col, self.cursor_abs);
         }
     }
 
