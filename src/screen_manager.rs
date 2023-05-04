@@ -100,16 +100,12 @@ pub struct TextScreen {
 
 impl TextScreen {
     fn put_cursor(&self, target: &mut Renderer<'_>, x: i32, y: i32) {
+        let cursor_width = target.loaded_font.glyph_width / 16;
         if self._cursor_enabled {
             target
                 .canvas
                 .set_draw_color(sdl2::pixels::Color::RGB(255, 255, 255));
-            let dst = Rect::new(
-                x,
-                y,
-                target.loaded_font.glyph_width / 16,
-                target.loaded_font.glyph_height,
-            );
+            let dst = Rect::new(x, y, cursor_width, target.loaded_font.glyph_height);
             target.canvas.fill_rect(dst).unwrap();
         }
     }
@@ -316,7 +312,11 @@ impl TextScreen {
             // Render the cursor if we are at the right place
             if self.cursor_enabled() && self.cursor_abs == cur_abs {
                 dbg!(x_offset, y_offset);
-                self.put_cursor(target, (x + x_offset) as i32, (y + y_offset) as i32);
+                self.put_cursor(
+                    target,
+                    (x + x_offset) as i32 + fch.bl,
+                    (y + y_offset) as i32,
+                );
             }
         }
         Ok(Rect::new(x as i32, y as i32, x + x_offset, y_offset))

@@ -67,6 +67,10 @@ where
     pub fn get(&self, key: &K) -> Option<Rc<RefCell<R>>> {
         self.table.get(key).cloned()
     }
+
+    pub fn clear(&mut self) {
+        self.table.clear();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -158,7 +162,7 @@ impl FontDef {
             Rect::new(x, y, info._ax, self.glyph_height)
         } else {
             Rect::new(
-                x + center_dist,
+                x, /*+ center_dist*/
                 y + baseline_dist,
                 info.bbox.width(),
                 info.bbox.height(),

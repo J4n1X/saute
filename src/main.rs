@@ -276,9 +276,18 @@ impl<'a> Renderer<'a> {
 //pub fn reinit_window_surface(window_surface: &mut WindowSurfaceRef, )
 
 pub fn main() -> Result<(), ()> {
+    use sdl2::keyboard::Mod;
+    use std::env;
+
+    if cfg!(debug_assertions) {
+        env::set_var("RUST_BACKTRACE", "1");
+    }
+
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
-    const FONT_FILE: &'static str = "fonts/Arial.ttf";
+    const FONT_FILE_DEFAULT: &'static str = "/home/janick/tests/saute/fonts/Arial.ttf";
+    const FONT_FILE_ALT: &'static str = "/home/janick/tests/saute/fonts/Consolas.ttf";
+    let mut using_alt_font = false;
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context
@@ -304,7 +313,8 @@ pub fn main() -> Result<(), ()> {
     let texman = window_canvas.texture_creator();
 
     let mut renderer = Renderer::new(window_canvas, &texman, WIDTH, HEIGHT);
-    renderer.build_atlas(FONT_FILE, FONT_SIZE);
+    println!("[INFO] Loading font {FONT_FILE_DEFAULT}");
+    renderer.build_atlas(FONT_FILE_DEFAULT, FONT_SIZE);
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|err| eprintln!("Failed to get event pump: {err}"))
@@ -330,8 +340,7 @@ pub fn main() -> Result<(), ()> {
     let debug_info_render_height = HEIGHT - renderer.loaded_font.glyph_height;
     debug_info_text.cursor_disable();
 
-    // lambda function that puts a string into
-
+    let mut keybind_handled = false;
     let mut need_update: bool = true;
     text_box.cursor_enable();
     'running: loop {
@@ -343,15 +352,32 @@ pub fn main() -> Result<(), ()> {
                     ..
                 } => break 'running,
                 Event::KeyDown {
-                    keycode: Some(Keycode::LAlt),
+                    keycode: Some(Keycode::F),
+                    keymod,
                     ..
                 } => {
-                    let pos = text_box.get_cursor_abs();
-                    text_box.set_highlight_mark(pos);
-                    println!("[INFO] Marker set to absolute position {pos}");
+                    if !keymod.contains(Mod::LALTMOD) {
+                        break;
+                    }
+                    println!("[INFO] Switching font!");
+                    renderer.texture_manager.clear();
+                    let font_path = if using_alt_font {
+                        using_alt_font = false;
+                        FONT_FILE_DEFAULT
+                    } else {
+                        using_alt_font = true;
+                        FONT_FILE_ALT
+                    };
+                    renderer.build_atlas(font_path, FONT_SIZE);
+                    let str = text_box.get_text();
+                    text_box.clear();
+                    text_box.push_string(renderer.loaded_font.get_string(str)?);
+                    need_update = true;
+                    keybind_handled = true;
                 }
                 Event::KeyDown { keycode, .. } => {
                     if let Some(code) = keycode {
+                        // normal event
                         match code {
                             Keycode::Return | Keycode::Return2 => {
                                 let fch = renderer
@@ -363,37 +389,34 @@ pub fn main() -> Result<(), ()> {
                                     .unwrap();
                                 text_box.push_char(fch);
                                 need_update = true;
+                                keybind_handled = true;
                             }
                             Keycode::Backspace => {
                                 text_box.pop_char();
                                 need_update = true;
+                                keybind_handled = true;
                             }
                             Keycode::Right => {
                                 text_box.cursor_forward();
                                 need_update = true;
+                                keybind_handled = true;
                             }
 
                             Keycode::Left => {
                                 text_box.cursor_back();
                                 need_update = true;
+                                keybind_handled = true;
                             }
                             _ => {}
                         }
                     }
                 }
                 Event::TextInput { text, .. } => {
+                    if keybind_handled {
+                        break;
+                    }
                     println!("[INFO] Event::TextInput triggered");
                     text_box.push_string(renderer.loaded_font.get_string(text)?);
-                    // text.chars().for_each(|ch| {
-                    //     let fch = renderer
-                    //         .loaded_font
-                    //         .get_char(ch as usize)
-                    //         .map_err(|_| {
-                    //             eprintln!("Failed to get char {ch} from texture atlas");
-                    //         })
-                    //         .unwrap();
-                    //     text_box.push_char(fch);
-                    // });
                     need_update = true;
                 }
                 Event::Window { win_event, .. } => {
@@ -414,6 +437,7 @@ pub fn main() -> Result<(), ()> {
                 _ => {}
             }
         }
+        keybind_handled = false;
         if need_update {
             println!(
                 "[INFO] Updating screen! {w} x {h}",
